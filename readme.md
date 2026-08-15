@@ -73,14 +73,15 @@ File cấu hình sử dụng trường `blocked_processes` chứa mảng các m�
 **Ví dụ cấu hình:**
 ```yaml
 blocked_processes:
-  - rav*.exe
-  - reasonlabs*.exe
-  - 360ts*.exe
-  - avast*.exe
-  - avg*.exe
-  - mcafee*.exe
-  - norton*.exe
-  - malwarebytes*.exe
+  - "*rav*"
+  - "*reasonlabs*"
+  - "*360*"
+  - "*360ts*"
+  - "*360safe*"
+  - "*360security*"
+  - "*avast*"
+  - "*avg*"
+  - "*avira*"
 ```
 *Ưu điểm: So khớp không phân biệt chữ hoa/thường, tự động hỗ trợ các phiên bản hoặc đuôi tên thay đổi (ví dụ: `avast_free.exe` sẽ khớp mẫu `avast*.exe`).*
 
