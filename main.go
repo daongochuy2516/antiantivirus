@@ -463,7 +463,7 @@ func getFileProductName(path string) string {
 		return ""
 	}
 
-	var transBlock uintptr
+	var transBlock unsafe.Pointer
 	var transLen uint32
 	subBlockPtr, _ := windows.UTF16PtrFromString(`\VarFileInfo\Translation`)
 	ret, _, _ = procVerQueryValue.Call(
@@ -475,15 +475,15 @@ func getFileProductName(path string) string {
 
 	langAndCodePage := "040904b0" // Default US English, Unicode
 	if ret != 0 && transLen >= 4 {
-		lang := *(*uint16)(unsafe.Pointer(transBlock))
-		codePage := *(*uint16)(unsafe.Pointer(transBlock + 2))
+		lang := *(*uint16)(transBlock)
+		codePage := *(*uint16)(unsafe.Pointer(uintptr(transBlock) + 2))
 		langAndCodePage = fmt.Sprintf("%04x%04x", lang, codePage)
 	}
 
 	queryKey := func(lpData []byte, langCode, key string) string {
 		subBlock := fmt.Sprintf(`\StringFileInfo\%s\%s`, langCode, key)
 		subBlockPtr, _ := windows.UTF16PtrFromString(subBlock)
-		var valueBlock uintptr
+		var valueBlock unsafe.Pointer
 		var valueLen uint32
 		r, _, _ := procVerQueryValue.Call(
 			uintptr(unsafe.Pointer(&lpData[0])),
@@ -492,7 +492,7 @@ func getFileProductName(path string) string {
 			uintptr(unsafe.Pointer(&valueLen)),
 		)
 		if r != 0 && valueLen > 0 {
-			return windows.UTF16ToString((*[32768]uint16)(unsafe.Pointer(valueBlock))[:valueLen])
+			return windows.UTF16ToString((*[32768]uint16)(valueBlock)[:valueLen])
 		}
 		return ""
 	}
