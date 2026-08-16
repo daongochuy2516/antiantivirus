@@ -31,9 +31,8 @@ graph TD
     N -- OK Confirm --> O[Khôi phục Process bằng NtResumeProcess]
     N -- Cancel --> P[Bắt buộc dừng bằng TerminateProcess]
     M -- Cancel Block --> P
-    P --> Q[Tự động xóa file exe của tiến trình]
     O --> F
-    Q --> F
+    P --> F
 ```
 
 1. **Khởi động & Nạp cấu hình**: Đọc danh sách mẫu tiến trình bị chặn (`blocked_processes`) từ file `rules.yaml`.
